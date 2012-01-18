@@ -63,7 +63,7 @@ func main() {
 		}
 		debug("File with size %v:\n", sz)
 		// we have a list of files with the same size, possibly candiates with equal content.
-		hashtree := make(map[string][]string)
+		hashtree := make(map[[sha1.Size]byte][]string)
 		for _, path := range flist {
 			f, err := os.Open(path)
 			if err != nil {
@@ -75,22 +75,23 @@ func main() {
 			var reader *bufio.Reader
 			//reader, err = bufio.NewReaderSize(f, 4*1024*1024)
 			reader = bufio.NewReader(f)
-			sha1 := sha1.New()
-			_, err = io.Copy(sha1, reader)
+			hash := sha1.New()
+			_, err = io.Copy(hash, reader)
 			if err != nil {
 				panic(err.Error())
 			}
 			f.Close()
-			hash := hex.EncodeToString(sha1.Sum(nil))
-			debug("path %v, hash %v\n", path, hash)
-			hashtree[hash] = append(hashtree[hash], path)
+			var sum [sha1.Size]byte
+			copy(sum[:], hash.Sum(nil))
+			debug("path %v, hash %v\n", path, hex.EncodeToString(sum[:]))
+			hashtree[sum] = append(hashtree[sum], path)
 		}
-		for hash, flist := range hashtree {
+		for sum, flist := range hashtree {
 			if len(flist) < 2 {
 				continue
 			}
 			sort.Sort(StringLenSorter(flist))
-			fmt.Printf("files with hash %v:\n%v\n", hash, flist)
+			fmt.Printf("files with hash %v:\n%v\n", hex.EncodeToString(sum[:]), flist)
 			for _, file := range flist[:len(flist)-1] {
 				fmt.Printf("Deleting dup %v\n", file)
 				if *delete {
