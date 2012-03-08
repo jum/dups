@@ -17,11 +17,13 @@ import (
 	"runtime"
 	"sort"
 	"sync/atomic"
+	"syscall"
 )
 
 var (
 	root   *string = flag.String("root", "test", "root dir for dup check")
 	delete *bool   = flag.Bool("delete", false, "do delete the longest dups")
+	emptydir *bool = flag.Bool("emptydir", false, "do delete empty directories as well")
 	ncpu   *int    = flag.Int("ncpu", runtime.NumCPU(), "number of cpu's to use")
 )
 
@@ -154,6 +156,21 @@ func main() {
 					err := os.Remove(file)
 					if err != nil {
 						panic(err.Error())
+					} else {
+						if *emptydir {
+							parent := filepath.Dir(file)
+							debug("attempt del dir %v\n", parent)
+							err := os.Remove(parent)
+							if err != nil {
+								if e, ok := err.(*os.PathError); ok {
+									if e.Err == syscall.ENOTEMPTY {
+										debug("%v is not empty\n", parent)
+										continue
+									}
+								}
+								panic(err.Error())
+							}
+						}
 					}
 				}
 			}
