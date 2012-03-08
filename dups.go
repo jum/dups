@@ -14,15 +14,18 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"sync/atomic"
 )
 
 var (
 	root   *string = flag.String("root", "test", "root dir for dup check")
 	delete *bool   = flag.Bool("delete", false, "do delete the longest dups")
+	ncpu   *int    = flag.Int("ncpu", runtime.NumCPU(), "number of cpu's to use")
 )
 
-const DEBUG = false
+const DEBUG = true
 
 func debug(format string, a ...interface{}) {
 	if DEBUG {
@@ -36,8 +39,16 @@ func (p StringLenSorter) Len() int           { return len(p) }
 func (p StringLenSorter) Less(i, j int) bool { return len(p[i]) >= len(p[j]) }
 func (p StringLenSorter) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
 
+type HashResult struct {
+	FileName string
+	Err error
+	Hash []byte
+}
+
 func main() {
 	flag.Parse()
+	debug("ncpu %v\n", *ncpu)
+	runtime.GOMAXPROCS(*ncpu)
 	tree := make(map[int64][]string)
 	err := filepath.Walk(*root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -64,27 +75,71 @@ func main() {
 		debug("File with size %v:\n", sz)
 		// we have a list of files with the same size, possibly candiates with equal content.
 		hashtree := make(map[[sha1.Size]byte][]string)
+		var numOutstanding int32
+		done := make(chan *HashResult, *ncpu)
+		req := make(chan *HashResult, *ncpu)
+		for i := 0; i < runtime.NumCPU(); i++ {
+			go func() {
+				for r := <-req; r != nil; {
+					debug("req path %v\n", r.FileName)
+					f, err := os.Open(r.FileName)
+					if err != nil {
+						//panic(err.Error())
+						// continue if file can not be opened
+						r.Err = err
+						done <- r
+						return
+					}
+					var reader *bufio.Reader
+					//reader, err = bufio.NewReaderSize(f, 4*1024*1024)
+					reader = bufio.NewReader(f)
+					hash := sha1.New()
+					_, err = io.Copy(hash, reader)
+					if err != nil {
+						panic(err.Error())
+					}
+					f.Close()
+					r.Hash = hash.Sum(nil)
+					debug("done %#v\n", r)
+					done <- r
+				}
+			} ()
+		}
+		var killResultFetcher = make(chan int)
+		go func() {
+			for {
+				select {
+				case res := <-done:
+					if res.Err != nil {
+						fmt.Fprintf(os.Stderr, "%v: %v\n", res.FileName, res.Err)
+					} else {
+						var sum [sha1.Size]byte
+						copy(sum[:], res.Hash)
+						debug("path %v, hash %v\n", res.FileName, hex.EncodeToString(sum[:]))
+						hashtree[sum] = append(hashtree[sum], res.FileName)
+					}
+					_ = atomic.AddInt32(&numOutstanding, -1)
+				case <-killResultFetcher:
+					return
+				}
+			}
+		}()
 		for _, path := range flist {
-			f, err := os.Open(path)
-			if err != nil {
-				//panic(err.Error())
-				// continue if file can not be opened
-				fmt.Fprintf(os.Stderr, "%v: %v\n", path, err)
-				continue
+			_ = atomic.AddInt32(&numOutstanding, 1)
+			req <- &HashResult{FileName: path}
+		}
+		close(req)
+		killResultFetcher <- 1
+		for atomic.AddInt32(&numOutstanding, -1) >= 0 {
+			res := <-done
+			if res.Err != nil {
+				fmt.Fprintf(os.Stderr, "%v: %v\n", res.FileName, res.Err)
+			} else {
+				var sum [sha1.Size]byte
+				copy(sum[:], res.Hash)
+				debug("path %v, hash %v\n", res.FileName, hex.EncodeToString(sum[:]))
+				hashtree[sum] = append(hashtree[sum], res.FileName)
 			}
-			var reader *bufio.Reader
-			//reader, err = bufio.NewReaderSize(f, 4*1024*1024)
-			reader = bufio.NewReader(f)
-			hash := sha1.New()
-			_, err = io.Copy(hash, reader)
-			if err != nil {
-				panic(err.Error())
-			}
-			f.Close()
-			var sum [sha1.Size]byte
-			copy(sum[:], hash.Sum(nil))
-			debug("path %v, hash %v\n", path, hex.EncodeToString(sum[:]))
-			hashtree[sum] = append(hashtree[sum], path)
 		}
 		for sum, flist := range hashtree {
 			if len(flist) < 2 {
