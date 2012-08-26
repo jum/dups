@@ -16,7 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
-	"sync/atomic"
+	"sync"
 	"syscall"
 )
 
@@ -77,12 +77,13 @@ func main() {
 		debug("File with size %v:\n", sz)
 		// we have a list of files with the same size, possibly candiates with equal content.
 		hashtree := make(map[[sha1.Size]byte][]string)
-		var numOutstanding int32
-		done := make(chan *HashResult, *ncpu)
-		req := make(chan *HashResult, *ncpu)
-		for i := 0; i < runtime.NumCPU(); i++ {
+		done := make(chan *HashResult)
+		req := make(chan *HashResult)
+		var wg sync.WaitGroup
+		wg.Add(*ncpu)
+		for i := 0; i < *ncpu; i++ {
 			go func() {
-				for r := <-req; r != nil; {
+				for r := range req {
 					debug("req path %v\n", r.FileName)
 					f, err := os.Open(r.FileName)
 					if err != nil {
@@ -90,7 +91,7 @@ func main() {
 						// continue if file can not be opened
 						r.Err = err
 						done <- r
-						return
+						continue
 					}
 					var reader *bufio.Reader
 					//reader, err = bufio.NewReaderSize(f, 4*1024*1024)
@@ -105,9 +106,12 @@ func main() {
 					debug("done %#v\n", r)
 					done <- r
 				}
+				wg.Done()
 			} ()
 		}
-		var killResultFetcher = make(chan int)
+		var killResultFetcher = make(chan bool)
+		var wk sync.WaitGroup
+		wk.Add(1)
 		go func() {
 			for {
 				select {
@@ -120,29 +124,19 @@ func main() {
 						debug("path %v, hash %v\n", res.FileName, hex.EncodeToString(sum[:]))
 						hashtree[sum] = append(hashtree[sum], res.FileName)
 					}
-					_ = atomic.AddInt32(&numOutstanding, -1)
 				case <-killResultFetcher:
+					wk.Done()
 					return
 				}
 			}
 		}()
 		for _, path := range flist {
-			_ = atomic.AddInt32(&numOutstanding, 1)
 			req <- &HashResult{FileName: path}
 		}
 		close(req)
-		killResultFetcher <- 1
-		for atomic.AddInt32(&numOutstanding, -1) >= 0 {
-			res := <-done
-			if res.Err != nil {
-				fmt.Fprintf(os.Stderr, "%v: %v\n", res.FileName, res.Err)
-			} else {
-				var sum [sha1.Size]byte
-				copy(sum[:], res.Hash)
-				debug("path %v, hash %v\n", res.FileName, hex.EncodeToString(sum[:]))
-				hashtree[sum] = append(hashtree[sum], res.FileName)
-			}
-		}
+		wg.Wait()
+		killResultFetcher <- true
+		wk.Wait()
 		for sum, flist := range hashtree {
 			if len(flist) < 2 {
 				continue
