@@ -58,7 +58,7 @@ func main() {
 			return err
 		}
 		// skip over non-regular files
-		if info.Mode() & os.ModeType != 0 {
+		if !info.Mode().IsRegular() {
 			return nil
 		}
 		debug("walkFn path %v\n", path)
