@@ -21,10 +21,10 @@ import (
 )
 
 var (
-	root   *string = flag.String("root", "test", "root dir for dup check")
-	delete *bool   = flag.Bool("delete", false, "do delete the longest dups")
-	emptydir *bool = flag.Bool("emptydir", false, "do delete empty directories as well")
-	ncpu   *int    = flag.Int("ncpu", runtime.NumCPU(), "number of cpu's to use")
+	root     *string = flag.String("root", "test", "root dir for dup check")
+	delete   *bool   = flag.Bool("delete", false, "do delete the longest dups")
+	emptydir *bool   = flag.Bool("emptydir", false, "do delete empty directories as well")
+	ncpu     *int    = flag.Int("ncpu", runtime.NumCPU(), "number of cpu's to use")
 )
 
 const DEBUG = true
@@ -43,8 +43,8 @@ func (p StringLenSorter) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
 
 type HashResult struct {
 	FileName string
-	Err error
-	Hash []byte
+	Err      error
+	Hash     []byte
 }
 
 func main() {
@@ -83,6 +83,7 @@ func main() {
 		wg.Add(*ncpu)
 		for i := 0; i < *ncpu; i++ {
 			go func() {
+				defer wg.Done()
 				for r := range req {
 					debug("req path %v\n", r.FileName)
 					f, err := os.Open(r.FileName)
@@ -106,13 +107,13 @@ func main() {
 					debug("done %#v\n", r)
 					done <- r
 				}
-				wg.Done()
-			} ()
+			}()
 		}
 		var killResultFetcher = make(chan bool)
 		var wk sync.WaitGroup
 		wk.Add(1)
 		go func() {
+			defer wk.Done()
 			for {
 				select {
 				case res := <-done:
@@ -125,7 +126,6 @@ func main() {
 						hashtree[sum] = append(hashtree[sum], res.FileName)
 					}
 				case <-killResultFetcher:
-					wk.Done()
 					return
 				}
 			}
